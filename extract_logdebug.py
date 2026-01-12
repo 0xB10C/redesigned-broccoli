@@ -19,25 +19,19 @@ except ImportError:
     print("Error: clang package not found. Install with: pip install clang")
     sys.exit(1)
 
+SKIP_PATHS = [
+    "bitcoin/src/test/",
+    "bitcoin/src/bench/",
+    "bitcoin/src/wallet/",
+    "bitcoin/src/qt/",
+    "bitcoin/contrib/",
+];
+
 
 class LogDebugExtractor:
     def __init__(self, source_dir: Path):
         self.source_dir = Path(source_dir)
         self.results: List[Dict[str, Any]] = []
-        
-    def get_compile_args(self) -> List[str]:
-        """Get compilation arguments needed for parsing Bitcoin Core code."""
-        # Basic C++ flags that Bitcoin Core uses
-        return [
-            '-std=c++20',
-            '-x', 'c++',
-            '-I' + str(self.source_dir),
-            '-I' + str(self.source_dir / '..' / 'build' / 'src' / 'config'),
-            # Add common include paths
-            '-I/usr/include',
-            '-I/usr/include/c++/v1',
-            '-Wno-everything',  # Suppress warnings
-        ]
     
     def get_source_files(self) -> List[Path]:
         """Find all C++ source files in the source directory."""
@@ -397,16 +391,29 @@ class LogDebugExtractor:
         print(f"Processing {file_path}...", file=sys.stderr)
         
         index = clang.cindex.Index.create()
-        compile_args = self.get_compile_args()
         
         try:
+
+            cdb = cindex.CompilationDatabase.fromDirectory(
+                str(self.source_dir.parent / "build")
+            )
+
+            commands = cdb.getCompileCommands(str(file_path))
+            if not commands:
+                print(f"  No compile command for {file_path}", file=sys.stderr)
+                return []
+
+            cmd = commands[0]
+
+            # Drop the compiler executable (clang++ / g++)
+            args = list(cmd.arguments)[1:]
+
             translation_unit = index.parse(
                 str(file_path),
-                args=compile_args,
-                options=clang.cindex.TranslationUnit.PARSE_SKIP_FUNCTION_BODIES |
-                        clang.cindex.TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD
-            )
-            
+                args=args,
+                options=clang.cindex.TranslationUnit.PARSE_SKIP_FUNCTION_BODIES | clang.cindex.TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD,
+                unsaved_files=None,
+            )         
             # Check for errors
             if translation_unit.diagnostics:
                 # Filter out common non-critical errors
@@ -419,7 +426,7 @@ class LogDebugExtractor:
                     for error in critical_errors:
                         print(f"    {error.spelling}", file=sys.stderr)
                         print(f"    {error.location.file.name}:{error.location.line}:{error.location.column}", file=sys.stderr)
-                        print(f"    {error.source_location.file.name}:{error.source_location.line}:{error.source_location.column}", file=sys.stderr)
+                        #print(f"    {error.source_location.file.name}:{error.source_location.line}:{error.source_location.column}", file=sys.stderr)
 
             return self.extract_logdebug_calls(translation_unit, file_path)
         except Exception as e:
@@ -427,11 +434,15 @@ class LogDebugExtractor:
             return []
     
     def run(self):
-        """Run the extraction on all source files."""
+        """Run the extraction on relevant source files."""
         source_files = self.get_source_files()
         print(f"Found {len(source_files)} source files", file=sys.stderr)
         
         for file_path in source_files:
+            if any(str(file_path).startswith(skip_path) for skip_path in SKIP_PATHS):
+                print(f"Skipping {file_path}..", file=sys.stderr)
+                continue
+            
             calls = self.process_file(file_path)
             self.results.extend(calls)
         
